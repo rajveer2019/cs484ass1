@@ -1,9 +1,9 @@
 import tkinter as tk
-from gui import ImageBrowserGUI
+from gui import ImageViewer
 
 def main():
     root = tk.Tk()
-    app = ImageBrowserGUI(root)
+    app = ImageViewer(root)
     root.mainloop()
 
 if __name__ == "__main__":
