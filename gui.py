@@ -87,6 +87,11 @@ class ImageViewer:
         # Includes close button for closing the application and reset for returning the image grid to its defaul setting at the bottom for simplicity
         self.retrieveButton = tk.Frame(self.navFrame)
         self.retrieveButton.pack(side=tk.LEFT, padx=20)
+        
+        #this is for the intensity and colour code button
+        self.retrieveBothButton = tk.Button(
+            self.retrieveButton, text="Intensity and Color Code Method", command=self.retrieveByBothMethods, width=28, height=2)
+        self.retrieveBothButton.pack(pady=5)  
 
         self.retrieveColorCodeButton = tk.Button(
             self.retrieveButton, text="Retrieve by Color-Code Method", command=self.retrieveByColorCode, width=28, height=2)
@@ -104,6 +109,19 @@ class ImageViewer:
             self.retrieveButton, text="Reset", command=self.resetOrder, width=28, height=2)
         self.resetButton.pack(pady=5)
 
+
+       # Add a Checkbutton for relevance toggle below the Up and Down buttons
+        self.relevanceChecked = tk.BooleanVar()  # Variable to hold the state of the Checkbutton
+
+        self.relevanceToggle = tk.Checkbutton(
+            self.navButton, text="Relevance", variable=self.relevanceChecked, onvalue=True, offvalue=False,
+            command=self.onRelevanceToggle)
+        self.relevanceToggle.pack(pady=5)
+
+        #relevant checkbox for each image
+        self.relevanceState = {i: tk.BooleanVar() for i in range(self.totalImages)}
+
+
         # Displaying all images in a grid
         self.displayImages()
 
@@ -115,12 +133,16 @@ class ImageViewer:
     # Binds click to each image, allowing the user to select individual images
     # Updates the page number based on the current order
     def displayImages(self):
+        # Clear the existing grid before creating a new one
+        for widget in self.canvas.winfo_children():
+            widget.destroy()
+
         # Create a new grid whenever display is called
         self.grid = tk.Frame(self.canvas)
         self.canvas.create_window(
             (0, 0), window=self.grid, anchor="nw")
 
-        # Prepare a new list of image to be display
+        # Prepare a new list of images to be displayed
         imagesToDisplay = []
         for i in self.sortedImages:
             imagesToDisplay.append(self.imageList[i])
@@ -129,31 +151,43 @@ class ImageViewer:
         endIndex = min(startIndex + self.imagesPerPage, len(imagesToDisplay))
         columns = 4
 
-        # Go through all teh images to display on the current page
+        # Go through all the images to display on the current page
         for i, imgIndex in enumerate(range(startIndex, endIndex)):
             img = imagesToDisplay[imgIndex]
-            imgResized = img.resize((197, 143))
+            imgResized = img.resize((197, 143))  # Fixed size for consistency
             imgTk = ImageTk.PhotoImage(imgResized)
 
-            # Create the grid for the current image
-            imgFrame = tk.Frame(self.grid)
+            # Create the grid for the current image with fixed size to avoid resizing
+            imgFrame = tk.Frame(self.grid, width=200, height=200)
+            imgFrame.grid_propagate(False)  # Prevent frame resizing based on contents
             imgFrame.grid(row=i // columns, column=i % columns, padx=5, pady=5)
 
-            # Label new images
+            # Label for displaying the image
             label = tk.Label(imgFrame, image=imgTk)
             label.image = imgTk
             label.pack()
+
+            # Name label for the image
             imageName = f"{self.sortedImages[imgIndex] + 1}.jpg"
             nameLabel = tk.Label(imgFrame, text=imageName, wraplength=200)
             nameLabel.pack()
 
-            # Binds click to each image
-            label.bind("<Button-1>", lambda e,
-                       index=self.sortedImages[imgIndex]: self.displaySelectedImage(index))
+            # Add relevance checkbox if relevance toggle is enabled
+            if self.relevanceChecked.get():
+                relevanceCheck = tk.Checkbutton(
+                    imgFrame, text="Relevant", variable=self.relevanceState[self.sortedImages[imgIndex]])
+                relevanceCheck.pack()
 
-            # Update the page number label
-            self.pageNumber.config(
-                text=f"Page {self.currentPage + 1} / 5")
+            # Bind click to each image
+            label.bind("<Button-1>", lambda e,
+                    index=self.sortedImages[imgIndex]: self.displaySelectedImage(index))
+
+        # Update the page number label
+        numPages = (self.totalImages + self.imagesPerPage - 1) // self.imagesPerPage
+        self.pageNumber.config(
+            text=f"Page {self.currentPage + 1} / {numPages}")
+
+
 
     # displaySelectedImage
     #
@@ -371,5 +405,104 @@ class ImageViewer:
     # Resets current page
     def resetOrder(self):
         self.sortedImages = list(range(self.totalImages))
+        self.currentPage = 0
+        self.displayImages()
+
+    def onRelevanceToggle(self):
+        """Handle relevance toggle state change."""
+        if self.relevanceChecked.get():
+            print("Relevance enabled")
+        else:
+            print("Relevance disabled")
+
+        # Refresh the displayed images to add or remove relevance checkboxes
+        self.displayImages()
+        
+    def intensityAndColorCodeHistogram(self, img):
+        intensity = self.intensityHistogram(img).astype(float)  # Convert to float
+        colorCode = self.colorCodeHistogram(img).astype(float)  # Convert to float
+
+        # Normalize histograms by the number of pixels in the image
+        imageSize = img.size[0] * img.size[1]  # Total number of pixels
+        if imageSize > 0:
+            intensity /= imageSize
+            colorCode /= imageSize
+
+        return np.concatenate((intensity, colorCode))
+
+    def calculateAverageHistogram(self):
+        totalBins = np.zeros(89)  # 25 for intensity + 64 for color code
+        numImages = len(self.imageList)
+
+        for img in self.imageList:
+            combinedHistogram = self.intensityAndColorCodeHistogram(img)
+            totalBins += combinedHistogram  # Accumulate values for each bin separately
+
+        return totalBins / numImages  # Compute the average
+
+    def calculateStandardDeviation(self):
+        averageHistogram = self.calculateAverageHistogram()
+        totalVariance = np.zeros(89)
+
+        for img in self.imageList:
+            combinedHistogram = self.intensityAndColorCodeHistogram(img)
+            variance = (combinedHistogram - averageHistogram) ** 2
+            totalVariance += variance
+
+        # Calculate the standard deviation
+        return np.sqrt(totalVariance / (len(self.imageList) - 1))
+
+    def gaussianNormalization(self):
+        averageHistogram = self.calculateAverageHistogram()
+        stdDevHistogram = self.calculateStandardDeviation()
+
+        normalizedHistograms = []
+
+        for img in self.imageList:
+            combinedHistogram = self.intensityAndColorCodeHistogram(img)
+            normalizedHistogram = np.zeros(89)
+
+            # Normalize using Gaussian normalization
+            for i in range(89):
+                if (stdDevHistogram[i] <= 0):
+                    normalizedHistogram[i] = (combinedHistogram[i] - averageHistogram[i]) / (0.5)
+                else:
+                    normalizedHistogram[i] = (combinedHistogram[i] - averageHistogram[i]) / (stdDevHistogram[i])
+
+            normalizedHistograms.append(normalizedHistogram)
+            
+
+        return normalizedHistograms
+
+    def retrieveByBothMethods(self):
+        # Check if an image has been selected
+        if not self.selectedImageName:
+            return
+
+        # Get the list of Gaussian-normalized histograms for all images
+        normalizedHistograms = self.gaussianNormalization()
+
+        # Find the index of the selected image
+        selectedImageIndex = int(self.selectedImageName.split('.')[0]) - 1
+        selectedHistogram = normalizedHistograms[selectedImageIndex]
+
+        # List to hold distances
+        distances = []
+
+        # Calculate distances from the selected image to all other images
+        for imageIndex, normalizedHistogram in enumerate(normalizedHistograms):
+            if imageIndex == selectedImageIndex:
+                continue
+            # Calculate Manhattan distance
+            distance = np.sum(np.abs(selectedHistogram - normalizedHistogram))
+            distances.append((imageIndex, distance))  # Store as (index, distance) tuple
+
+        # Sort by distance (ascending order)
+        distances.sort(key=lambda x: x[1])
+
+        # Update the sorted image list based on the sorted distances
+        self.sortedImages = [selectedImageIndex] + [index for index, _ in distances]
+
+        # Reset the current page to 0 and refresh the displayed images
         self.currentPage = 0
         self.displayImages()
