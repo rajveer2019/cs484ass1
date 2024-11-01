@@ -251,19 +251,20 @@ class ImageViewer:
     # Go through each pixel, sorts them into each of the 25 bins
     # Count the occurrences in each bin
     def intensityHistogram(self, img):
-        # Initializes a histogram with 25 bins
+    # Initializes a histogram with 25 bins
         histogram = np.zeros(25, dtype=int)
 
-        # Convert the image to grayscale
-        img = img.convert("L")
+        # Convert the image to RGB (if it's not already in RGB format)
+        img = img.convert("RGB")
 
         # Create an array to hold pixels
         pixels = np.array(img)
 
-        # Go through each pixel's intensity and divide it by 10 to group it into a bin of ranges like 0-9, but does not go beyond 24
-        for intensity in pixels.flatten():
-            binIndex = min(intensity // 10, 24)
-            histogram[binIndex] += 1
+        # Go through each pixel's RGB values and calculate the intensity
+        for r, g, b in pixels.reshape(-1, 3):
+            value = 0.299 * r + 0.587 * g + 0.114 * b  # Calculate the intensity using the weighted formula
+            binIndex = min(int(value) // 10, 24)  # Group the value into a bin of ranges (0-9, 10-19, ..., 240-249)
+            histogram[binIndex] += 1  # Increment the corresponding bin in the histogram
 
         return histogram
 
@@ -427,50 +428,47 @@ class ImageViewer:
         if imageSize > 0:
             intensity /= imageSize
             colorCode /= imageSize
+            
+        combinedHistogram = np.concatenate((intensity, colorCode))
 
-        return np.concatenate((intensity, colorCode))
+        return combinedHistogram
 
     def calculateAverageHistogram(self):
-        totalBins = np.zeros(89)  # 25 for intensity + 64 for color code
-        numImages = len(self.imageList)
-
-        for img in self.imageList:
-            combinedHistogram = self.intensityAndColorCodeHistogram(img)
-            totalBins += combinedHistogram  # Accumulate values for each bin separately
-
-        return totalBins / numImages  # Compute the average
+        # Create an array to hold histograms for all images
+        histograms = np.array([self.intensityAndColorCodeHistogram(img) for img in self.imageList])
+        # Calculate and return the average histogram
+        return np.average(histograms, axis=0)
 
     def calculateStandardDeviation(self):
-        averageHistogram = self.calculateAverageHistogram()
-        totalVariance = np.zeros(89)
-
-        for img in self.imageList:
-            combinedHistogram = self.intensityAndColorCodeHistogram(img)
-            variance = (combinedHistogram - averageHistogram) ** 2
-            totalVariance += variance
-
-        # Calculate the standard deviation
-        return np.sqrt(totalVariance / (len(self.imageList) - 1))
+        # Create an array to hold histograms for all images
+        histograms = np.array([self.intensityAndColorCodeHistogram(img) for img in self.imageList])
+        # Calculate and return the standard deviation
+        return np.std(histograms, axis=0, ddof=1)  # Using ddof=1 for sample standard deviation
 
     def gaussianNormalization(self):
         averageHistogram = self.calculateAverageHistogram()
         stdDevHistogram = self.calculateStandardDeviation()
+        
+        # Find non-zero standard deviations
+        nonZeroStdDevs = stdDevHistogram[stdDevHistogram > 0]
+        
+        # Calculate sti as 0.5 times the minimum of non-zero standard deviations, if any exist
+        sti = 0.5 * np.min(nonZeroStdDevs) if nonZeroStdDevs.size > 0 else 0.5
+
+        # Replace zero or negative standard deviations with sti
+        adjustedStdDevHistogram = np.where(stdDevHistogram <= 0, sti, stdDevHistogram)
 
         normalizedHistograms = []
-
-        for img in self.imageList:
+        
+        for imgIndex, img in enumerate(self.imageList):
             combinedHistogram = self.intensityAndColorCodeHistogram(img)
             normalizedHistogram = np.zeros(89)
 
             # Normalize using Gaussian normalization
             for i in range(89):
-                if (stdDevHistogram[i] <= 0):
-                    normalizedHistogram[i] = (combinedHistogram[i] - averageHistogram[i]) / (0.5)
-                else:
-                    normalizedHistogram[i] = (combinedHistogram[i] - averageHistogram[i]) / (stdDevHistogram[i])
+                normalizedHistogram[i] = (combinedHistogram[i] - averageHistogram[i]) / adjustedStdDevHistogram[i]
 
             normalizedHistograms.append(normalizedHistogram)
-            
 
         return normalizedHistograms
 
@@ -494,15 +492,13 @@ class ImageViewer:
             if imageIndex == selectedImageIndex:
                 continue
             # Calculate Manhattan distance
-            distance = np.sum(np.abs(selectedHistogram - normalizedHistogram))
+            distance = np.sum(np.abs(selectedHistogram - normalizedHistogram) / 98)
             distances.append((imageIndex, distance))  # Store as (index, distance) tuple
 
         # Sort by distance (ascending order)
         distances.sort(key=lambda x: x[1])
-
-        # Update the sorted image list based on the sorted distances
+            
+        # Update sorted image list and display images
         self.sortedImages = [selectedImageIndex] + [index for index, _ in distances]
-
-        # Reset the current page to 0 and refresh the displayed images
         self.currentPage = 0
         self.displayImages()
