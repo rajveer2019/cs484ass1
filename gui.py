@@ -39,6 +39,10 @@ class ImageViewer:
         self.totalImages = 100
         self.currentPage = 0
         self.selectedImageName = None
+        self.relevanceChecked = tk.BooleanVar()  # Variable to hold the state of the Checkbutton
+        self.relevanceState = {}
+        self.relevantIndices = []
+        
 
         # Initialized a list to store all the images from the image files, with each image named based on its order number
         self.imageList = []
@@ -110,9 +114,6 @@ class ImageViewer:
         self.resetButton.pack(pady=5)
 
 
-       # Add a Checkbutton for relevance toggle below the Up and Down buttons
-        self.relevanceChecked = tk.BooleanVar()  # Variable to hold the state of the Checkbutton
-
         self.relevanceToggle = tk.Checkbutton(
             self.navButton, text="Relevance", variable=self.relevanceChecked, onvalue=True, offvalue=False,
             command=self.onRelevanceToggle)
@@ -166,17 +167,24 @@ class ImageViewer:
             label = tk.Label(imgFrame, image=imgTk)
             label.image = imgTk
             label.pack()
-
-            # Name label for the image
+            
             imageName = f"{self.sortedImages[imgIndex] + 1}.jpg"
             nameLabel = tk.Label(imgFrame, text=imageName, wraplength=200)
-            nameLabel.pack()
 
-            # Add relevance checkbox if relevance toggle is enabled
+            # If relevanceChecked is enabled, create a combined label and checkbox text
             if self.relevanceChecked.get():
+                # Combined relevance checkbox with the label text, including some spaces for separation
+                combinedText = f"Relevant    {imageName}"
                 relevanceCheck = tk.Checkbutton(
-                    imgFrame, text="Relevant", variable=self.relevanceState[self.sortedImages[imgIndex]])
-                relevanceCheck.pack()
+                    imgFrame, text=combinedText,
+                    variable=self.relevanceState[self.sortedImages[imgIndex]],
+                    command=self.updateRelevance
+                )
+                relevanceCheck.pack(padx=5)
+            else:
+                # If relevanceChecked is not true, just display the image name label
+                nameLabel = tk.Label(imgFrame, text=imageName, wraplength=200)
+                nameLabel.pack()
 
             # Bind click to each image
             label.bind("<Button-1>", lambda e,
@@ -420,85 +428,96 @@ class ImageViewer:
         self.displayImages()
         
     def intensityAndColorCodeHistogram(self, img):
-        intensity = self.intensityHistogram(img).astype(float)  # Convert to float
-        colorCode = self.colorCodeHistogram(img).astype(float)  # Convert to float
+        # Combine intensity and color code histograms and normalize by image size
+        intensity = self.intensityHistogram(img).astype(float)
+        colorCode = self.colorCodeHistogram(img).astype(float)
+        imageSize = img.size[0] * img.size[1]
 
-        # Normalize histograms by the number of pixels in the image
-        imageSize = img.size[0] * img.size[1]  # Total number of pixels
+        # Only divide if imageSize is non-zero
         if imageSize > 0:
             intensity /= imageSize
             colorCode /= imageSize
-            
-        combinedHistogram = np.concatenate((intensity, colorCode))
 
-        return combinedHistogram
+        return np.concatenate((intensity, colorCode))
 
-    def calculateAverageHistogram(self):
-        # Create an array to hold histograms for all images
-        histograms = np.array([self.intensityAndColorCodeHistogram(img) for img in self.imageList])
-        # Calculate and return the average histogram
-        return np.average(histograms, axis=0)
-
-    def calculateStandardDeviation(self):
-        # Create an array to hold histograms for all images
-        histograms = np.array([self.intensityAndColorCodeHistogram(img) for img in self.imageList])
-        # Calculate and return the standard deviation
-        return np.std(histograms, axis=0, ddof=1)  # Using ddof=1 for sample standard deviation
+    def precomputeHistograms(self):
+        # Precompute histograms for all images to avoid redundancy
+        self.histograms = np.array([self.intensityAndColorCodeHistogram(img) for img in self.imageList])
+        
+    def calculateAverageAndStdDevHistogram(self):
+        # Calculate both average and standard deviation in one pass
+        self.averageHistogram = np.mean(self.histograms, axis=0)
+        self.stdDevHistogram = np.std(self.histograms, axis=0, ddof=1)
+        
+        # Adjust zero standard deviations with sti
+        nonZeroStdDevs = self.stdDevHistogram[self.stdDevHistogram > 0]
+        sti = 0.5 * np.min(nonZeroStdDevs) if nonZeroStdDevs.size > 0 else 0.5
+        self.adjustedStdDevHistogram = np.where(self.stdDevHistogram <= 0, sti, self.stdDevHistogram)
 
     def gaussianNormalization(self):
-        averageHistogram = self.calculateAverageHistogram()
-        stdDevHistogram = self.calculateStandardDeviation()
-        
-        # Find non-zero standard deviations
-        nonZeroStdDevs = stdDevHistogram[stdDevHistogram > 0]
-        
-        # Calculate sti as 0.5 times the minimum of non-zero standard deviations, if any exist
-        sti = 0.5 * np.min(nonZeroStdDevs) if nonZeroStdDevs.size > 0 else 0.5
-
-        # Replace zero or negative standard deviations with sti
-        adjustedStdDevHistogram = np.where(stdDevHistogram <= 0, sti, stdDevHistogram)
-
-        normalizedHistograms = []
-        
-        for imgIndex, img in enumerate(self.imageList):
-            combinedHistogram = self.intensityAndColorCodeHistogram(img)
-            normalizedHistogram = np.zeros(89)
-
-            # Normalize using Gaussian normalization
-            for i in range(89):
-                normalizedHistogram[i] = (combinedHistogram[i] - averageHistogram[i]) / adjustedStdDevHistogram[i]
-
-            normalizedHistograms.append(normalizedHistogram)
-
+        # Vectorized normalization using broadcasting
+        normalizedHistograms = (self.histograms - self.averageHistogram) / self.adjustedStdDevHistogram
         return normalizedHistograms
 
     def retrieveByBothMethods(self):
-        # Check if an image has been selected
         if not self.selectedImageName:
             return
 
-        # Get the list of Gaussian-normalized histograms for all images
-        normalizedHistograms = self.gaussianNormalization()
+        # Precompute histograms and average/std dev histograms if not already done
+        if not hasattr(self, 'histograms'):
+            self.precomputeHistograms()
+            self.calculateAverageAndStdDevHistogram()
 
-        # Find the index of the selected image
+        # Get normalized histograms
+        normalizedHistograms = self.gaussianNormalization()
+        
+        # Get selected image index
         selectedImageIndex = int(self.selectedImageName.split('.')[0]) - 1
         selectedHistogram = normalizedHistograms[selectedImageIndex]
 
-        # List to hold distances
-        distances = []
 
-        # Calculate distances from the selected image to all other images
-        for imageIndex, normalizedHistogram in enumerate(normalizedHistograms):
-            if imageIndex == selectedImageIndex:
-                continue
-            # Calculate Manhattan distance
-            distance = np.sum(np.abs(selectedHistogram - normalizedHistogram) / 98)
-            distances.append((imageIndex, distance))  # Store as (index, distance) tuple
+        if self.relevanceChecked.get():
+            if self.relevanceState:
+                stdDevHistogram = self.updateRelevantWeight()
+                distances = np.sum(stdDevHistogram * np.abs(normalizedHistograms - selectedHistogram), axis=1)
+            else:
+                distances = np.sum(np.abs(normalizedHistograms - selectedHistogram) / 89, axis=1)
+        else:
+            distances = np.sum(np.abs(normalizedHistograms - selectedHistogram) / 89, axis=1)
+                
+        distances[selectedImageIndex] = np.inf  # Ignore the selected image itself
+        
+        # Sort by distance, getting indices sorted in ascending order
+        sortedIndices = np.argsort(distances)
 
-        # Sort by distance (ascending order)
-        distances.sort(key=lambda x: x[1])
-            
-        # Update sorted image list and display images
-        self.sortedImages = [selectedImageIndex] + [index for index, _ in distances]
+        # Update sorted image list and display
+        self.sortedImages = [selectedImageIndex] + sortedIndices.tolist()
         self.currentPage = 0
         self.displayImages()
+    
+    def updateRelevance(self):
+        # Select only the histograms of relevant-checked images
+        self.relevantIndices = [idx for idx, checked in self.relevanceState.items() if checked.get()]
+        
+    def updateRelevantWeight(self):
+        # Retrieve relevant image histograms based on relevanceState indices
+        
+        normalizedHistograms = self.gaussianNormalization()
+    
+        relevantHistograms = [normalizedHistograms[i] for i in self.relevantIndices]
+        
+        self.stdDevUpdate = np.std(relevantHistograms, axis=0, ddof=1)
+        
+        nonZeroStdDevsUpdate = self.stdDevUpdate[self.stdDevUpdate > 0]
+        
+        self.stdDevUpdate[self.stdDevUpdate == 0] = 0.5 * np.min(nonZeroStdDevsUpdate)
+        
+        updateHistogram = 1 / self.stdDevUpdate
+                
+        sumHistogram = np.sum(updateHistogram)
+        
+        updateHistogram /= sumHistogram
+    
+        # Return the normalized standard deviations
+        return updateHistogram
+        
